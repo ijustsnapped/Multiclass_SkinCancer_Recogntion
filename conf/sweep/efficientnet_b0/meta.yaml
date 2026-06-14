@@ -1,0 +1,75 @@
+# W&B / Optuna sweep for EfficientNet-B0 + patient-metadata fusion.
+#
+# Sweeps the fusion strategy (concatenation vs MetaBlock attention) together with
+# the optimizer and metadata-head hyperparameters. Needs splits/training/
+# hot_one_meta.csv (build with scripts/prepare_isic2019.py).
+#
+#   Optuna (recommended; objective = returned best sensitivity, name-independent):
+#     python -m src.hpo conf/sweep/efficientnet_b0/meta.yaml --n-trials 60 \
+#         --study-name b0_meta --storage sqlite:///hpo/b0_meta.db
+#
+#   W&B Bayesian sweep:
+#     wandb sweep conf/sweep/efficientnet_b0/meta.yaml
+#     wandb agent <entity>/<project>/<sweep_id>
+#
+# NOTE: the meta-head dims/dropouts below fully apply to fusion=concat
+# (CNNWithMetadata). For fusion=metablock only post_concat_dropout_p (classifier
+# dropout) is used; the other meta_head_args are inert for that arm.
+program: src/train.py
+method: bayes
+metric:
+  name: Val/Sensitivity_macro_P1_Joint   # Phase-1 joint CNN+meta training
+  goal: maximize
+early_terminate:
+  type: hyperband
+  min_iter: 10
+  eta: 3
+command:
+  - ${env}
+  - python
+  - -m
+  - src.train
+  - ${args_no_hyphens}
+parameters:
+  # --- group selection / fixed inputs ---
+  training_mode:
+    values: ['image_meta']
+  model:
+    values: ['efficientnet_b0']
+  optim:
+    values: ['adamw']
+  loss:
+    values: ['cross_entropy']
+  sampler:
+    values: ['class_balanced_sqrt']
+  training.num_epochs:
+    values: [40]
+  training.batch_size:
+    values: [64]
+  # --- the key metadata knob ---
+  model.meta_fusion:
+    values: ['concat', 'metablock']
+  # --- swept optimizer ---
+  training.optimizer.lr:
+    distribution: log_uniform_values
+    min: 1e-05
+    max: 5e-04
+  training.optimizer.weight_decay:
+    distribution: log_uniform_values
+    min: 1e-05
+    max: 1e-03
+  # --- swept metadata fusion / augmentation ---
+  data.meta_augmentation_p:
+    distribution: uniform
+    min: 0.0
+    max: 0.3
+  model.meta_head_args.meta_mlp_output_dim:
+    values: [128, 256, 512]
+  model.meta_head_args.meta_dropout_p:
+    distribution: uniform
+    min: 0.1
+    max: 0.5
+  model.meta_head_args.post_concat_dropout_p:
+    distribution: uniform
+    min: 0.1
+    max: 0.5

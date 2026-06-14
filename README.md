@@ -8,12 +8,14 @@ focal loss, class-balanced sampling), optional metadata fusion (age / sex /
 site), EMA, AMP, and TensorBoard. Experiments run through Hydra, with
 Weights & Biases and Optuna on top.
 
+> Deep Learning 2024/2025 class Project.
+
+
 ## Layout
 
-- `conf/` — Hydra configs (dataset, model, optim, loss, sampler, experiment, sweep)
+- `conf/` — Hydra configs (dataset, model, optim, loss, sampler, training_mode, experiment, sweep)
 - `src/` — code: `train.py`, `hpo.py`, and the `training/` loops, plus data/models/losses/utils
 - `scripts/` — dataset download + prep
-- `configs/` — original hand-written YAML configs
 - `notebooks/` — EDA
 
 `splits/`, `data/`, `outputs/`, `wandb/`, and `hpo/*.db` are git-ignored.
@@ -77,17 +79,17 @@ python -m src.train run.all_folds=true       # cross-validate
 python -m src.train wandb.enable=false       # TensorBoard only
 ```
 
+Metadata fusion (age / sex / anatomical site, opt-in — needs `hot_one_meta.csv`):
+
+```bash
+python -m src.train experiment=b0_meta                    # concatenation fusion
+python -m src.train experiment=b0_metablock               # MetaBlock attention fusion
+python -m src.train training_mode=image_meta model.meta_fusion=metablock
+```
+
 Hydra composes the nested-dict config that the legacy `train_one_fold` expects,
 so no training code is duplicated. W&B logging works by mirroring every
 TensorBoard scalar to the active run. Run `wandb login` once first.
-
-You can also run the loops directly:
-
-```bash
-python -m src.training.single_fold b0_cross_entropy_w_sampler --fold_id 0
-python -m src.training.cv --config_file configs/effnetb3.yaml
-python -m src.training.single_fold_meta config_meta_single --fold_id 0
-```
 
 ## 4. Hyperparameter optimization
 
@@ -114,6 +116,8 @@ There's no mid-trial pruning because the legacy loop only reports a final metric
 ## Notes
 - The 8 classes come from `argmax` over the ground-truth one-hot columns;
   `label2idx` is built from `sorted(unique(label))`.
-- Metadata one-hot columns match the `meta_features_names` blocks in
-  `configs/*.yaml`, used by the `*_with_meta` trainers.
+- Metadata fusion (`training_mode=image_meta`) fuses age/sex/site from
+  `hot_one_meta.csv`; pick `model.meta_fusion=concat` (CNNWithMetadata) or
+  `metablock` (attention, Pacheco & Krohling 2021). Per the literature metadata
+  helps overall accuracy (age > site > sex) but can dent rare-class sensitivity.
 - The dataset is CC-BY-NC 4.0 (non-commercial).

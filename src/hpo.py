@@ -64,13 +64,14 @@ def _suggest_override(trial, key, spec):
         value = trial.suggest_categorical(key, spec["values"])
     else:
         dist = spec.get("distribution", "uniform")
+        # YAML parses "1e-05" as a string, so coerce bounds to numbers.
         lo, hi = spec["min"], spec["max"]
-        if dist == "log_uniform_values":
-            value = trial.suggest_float(key, lo, hi, log=True)
-        elif dist == "int_uniform":
-            value = trial.suggest_int(key, lo, hi)
+        if dist == "int_uniform":
+            value = trial.suggest_int(key, int(lo), int(hi))
+        elif dist == "log_uniform_values":
+            value = trial.suggest_float(key, float(lo), float(hi), log=True)
         else:
-            value = trial.suggest_float(key, lo, hi)
+            value = trial.suggest_float(key, float(lo), float(hi))
     return f"{key}={_fmt(value)}"
 
 

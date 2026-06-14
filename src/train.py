@@ -43,10 +43,12 @@ def _experiment_name(cfg: dict) -> str:
 
 def _run_fold(cfg: dict, fold_id, exp_name: str, base_path: Path, seed: int,
               wandb_group: str | None) -> float | None:
-    """Replicates the orchestration of ``train_single_fold.main`` for one fold."""
+    """Replicates the legacy single-fold orchestration, routed by ``training_mode``
+    (image-only -> single_fold; image_meta -> single_fold_meta)."""
     set_seed(seed)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     fold_str = str(fold_id).replace(" ", "_").replace("/", "-")
+    training_mode = cfg.get("training_mode", "image")
 
     log_dir = (legacy._get_path_from_config(cfg, "log_dir", "outputs/tensorboard", base_path)
                / exp_name / f"fold_{fold_str}" / timestamp)
@@ -80,11 +82,23 @@ def _run_fold(cfg: dict, fold_id, exp_name: str, base_path: Path, seed: int,
     val_df = df[df["fold"] == fold_val].reset_index(drop=True)
     if train_df.empty or val_df.empty:
         raise ValueError(f"Fold {fold_val}: empty train ({len(train_df)}) or val ({len(val_df)}).")
-    logger.info(f"Fold {fold_val}: {len(train_df)} train / {len(val_df)} val samples.")
+    logger.info(f"Fold {fold_val} [{training_mode}]: {len(train_df)} train / {len(val_df)} val samples.")
 
     run = init_wandb(cfg, run_name=f"{exp_name}_fold{fold_str}", group=wandb_group,
-                     extra_config={"fold_id": fold_val, "seed": seed})
+                     extra_config={"fold_id": fold_val, "seed": seed, "training_mode": training_mode})
     try:
+        if training_mode == "image_meta":
+            meta_csv = legacy._get_path_from_config(cfg, "meta_csv", base_path=base_path)
+            if not meta_csv.exists():
+                raise FileNotFoundError(f"Meta CSV not found: {meta_csv}. "
+                                        "Run scripts/prepare_isic2019.py to build it.")
+            meta_df = pd.read_csv(meta_csv)
+            return meta_trainer.train_one_fold_with_meta(
+                fold_id=fold_id, train_df=train_df, val_df=val_df, meta_df=meta_df,
+                cfg=cfg, label2idx_model=label2idx, label2idx_eval=label2idx,
+                image_root=train_root, log_dir=log_dir, ckpt_dir=ckpt_dir,
+                exp_name=exp_name, device=device,
+            )
         return legacy.train_one_fold(
             fold_id=fold_id, train_df=train_df, val_df=val_df, cfg=cfg,
             label2idx=label2idx, train_root=train_root, log_dir=log_dir,
