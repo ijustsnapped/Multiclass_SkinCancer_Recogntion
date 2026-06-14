@@ -18,8 +18,6 @@ site), EMA, and AMP. Experiments run through Hydra, with Weights & Biases
 - `scripts/` — dataset download + prep
 - `notebooks/` — EDA
 
-`splits/`, `data/`, `outputs/`, `wandb/`, and `hpo/*.db` are git-ignored.
-
 ## 1. Get the dataset
 
 ISIC 2019 is 25,331 training images (~9 GB), licensed CC-BY-NC 4.0.
