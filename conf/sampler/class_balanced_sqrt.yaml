@@ -1,0 +1,2 @@
+# @package data.sampler
+type: class_balanced_sqrt

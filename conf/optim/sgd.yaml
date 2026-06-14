@@ -1,0 +1,11 @@
+# @package training
+optimizer:
+  type: SGD
+  lr: 1e-2
+  weight_decay: 1e-4
+  momentum: 0.9
+  nesterov: true
+scheduler:
+  type: CosineAnnealingLR
+  t_max: ${training.num_epochs}
+  min_lr: 0.0

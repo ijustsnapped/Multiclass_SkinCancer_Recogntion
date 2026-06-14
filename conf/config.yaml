@@ -1,0 +1,87 @@
+# Root Hydra config for ISIC 2019 skin-lesion classification.
+#
+# Composition produces the exact nested-dict schema the existing trainers
+# (train_single_fold.py / train_cv.py -> train_one_fold) already consume, so the
+# Hydra layer drives the legacy loops without rewriting them. Each config group
+# uses a `# @package` directive to merge into the right section of that schema.
+#
+# Examples:
+#   python -m src.train
+#   python -m src.train experiment=b3_ldam
+#   python -m src.train model=efficientnet_b3 optim=sgd loss=ldam
+#   python -m src.train run.all_folds=true wandb.project=my-isic
+defaults:
+  - dataset: isic2019
+  - model: efficientnet_b0
+  - optim: adamw
+  - loss: cross_entropy
+  - sampler: class_balanced_sqrt
+  - wandb: default
+  - _self_
+  - experiment: null
+
+# --- run control (consumed by src/train.py, not the legacy schema) ---
+run:
+  fold_id: 0          # which value of the CSV `fold` column is the validation fold
+  all_folds: false    # if true, loop over every fold present in labels.csv
+  seed: null          # overrides experiment_setup.seed when set
+
+experiment_setup:
+  experiment_name: null   # auto-built from model/loss/timestamp when null
+  seed: 42
+  device: cuda
+  TQDM_NCOLS: 100
+
+training:
+  num_epochs: 40
+  batch_size: 64
+  amp_enabled: true
+  accum_steps: 2
+  val_interval: 1
+  model_selection_metric: mean_optimal_sensitivity
+  save_optimal_thresholds: true
+  early_stopping_patience: 10
+  ema_decay: 0
+  use_ema_for_val: false
+  freeze_epochs: 0
+  backbone_lr_mult: 0.1
+  pauc_max_fpr: 0.2
+  # training.optimizer / training.scheduler          <- filled by optim group
+  # training.loss / training.drw_schedule_epochs      <- filled by loss group
+
+torch_compile:
+  enable: false
+  mode: default
+
+tensorboard_logging:
+  enable: true
+  log_interval_batches_train: 40
+  log_interval_batches_val: 10
+  log_epoch_summary: true
+  log_lr: true
+  log_throughput: true
+  log_gpu_time_epoch: true
+  image_logging:
+    enable: false
+    num_samples: 4
+    denormalize: true
+    log_at_epochs: [2, 20, 39]
+    log_train_input: false
+    log_val_input: false
+  profiler:
+    enable: false
+    profile_epoch: 1
+  memory_logging:
+    enable: true
+    log_interval_batches: 100
+    log_epoch_summary: true
+
+# Keep Hydra's run dir tidy and do NOT chdir, so relative data paths
+# (splits/...) resolve from the directory you launch from.
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/hydra/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/hydra/multirun/${now:%Y-%m-%d_%H-%M-%S}

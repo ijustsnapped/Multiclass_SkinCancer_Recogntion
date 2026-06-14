@@ -1,0 +1,14 @@
+# @package _global_
+# EfficientNet-B0 + cross-entropy + class-balanced-sqrt sampler (a sane baseline).
+defaults:
+  - override /model: efficientnet_b0
+  - override /optim: adamw
+  - override /loss: cross_entropy
+  - override /sampler: class_balanced_sqrt
+
+experiment_setup:
+  experiment_name: b0_ce_sampler
+
+training:
+  num_epochs: 40
+  batch_size: 64

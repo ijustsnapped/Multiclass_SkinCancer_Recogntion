@@ -1,0 +1,6 @@
+# @package training
+loss:
+  type: cross_entropy
+  focal_alpha: 0
+  focal_gamma: 0
+drw_schedule_epochs: []

@@ -1,0 +1,36 @@
+# @package _global_
+# ISIC 2019 — 8 classes (AK, BCC, BKL, DF, MEL, NV, SCC, VASC).
+# Build the files below with scripts/download_isic2019.py + scripts/prepare_isic2019.py.
+paths:
+  labels_csv: splits/training/labels.csv
+  train_root: splits/training
+  meta_csv: splits/training/hot_one_meta.csv
+  log_dir: outputs/tensorboard
+  ckpt_dir: outputs/checkpoints
+
+data:
+  num_workers: 8
+  prefetch_factor: 4
+  image_loader: pil
+  enable_ram_cache: false
+  cpu_augmentations:
+    resize: 256
+    crop_size: 224
+    norm_mean: [0.485, 0.456, 0.406]
+    norm_std: [0.229, 0.224, 0.225]
+    train:
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.5
+      affine_degrees: 15
+      affine_translate: [0.05, 0.05]
+      affine_scale_range: [0.9, 1.1]
+      affine_shear_degrees: 10
+      color_jitter_brightness: 0.1
+      color_jitter_contrast: 0.1
+      color_jitter_saturation: 0.1
+      color_jitter_hue: 0.1
+      rand_aug_n: 2
+      rand_aug_m: 9
+  gpu_augmentations:
+    enable: false
+    pipeline: []

@@ -1,0 +1,21 @@
+# @package _global_
+# EfficientNet-B3 + LDAM/DRW for the imbalanced ISIC tail classes. B3 wants a
+# larger input, so bump resize/crop and use gradient accumulation.
+defaults:
+  - override /model: efficientnet_b3
+  - override /optim: adamw
+  - override /loss: ldam
+  - override /sampler: class_balanced_sqrt
+
+experiment_setup:
+  experiment_name: b3_ldam
+
+training:
+  num_epochs: 60
+  batch_size: 32
+  accum_steps: 4
+
+data:
+  cpu_augmentations:
+    resize: 320
+    crop_size: 300

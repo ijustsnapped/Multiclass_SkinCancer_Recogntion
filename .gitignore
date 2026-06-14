@@ -1,8 +1,50 @@
-# Ignore splits directory
-**/splits/
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
 
-# Ignore outputs directory
-**/outputs/
-
-**/.venv/
+# ---- Virtual environments ----
 .venv/
+**/.venv/
+venv/
+env/
+
+# ---- Data & experiment outputs (not versioned) ----
+data/
+**/splits/
+**/outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# ---- Logs, profiles & artifacts ----
+*.log
+crop_log.txt
+profile_traces/
+*.trace.json
+output.png
+runs/
+tb_*/
+
+# ---- Hydra / W&B / Optuna ----
+.hydra/
+multirun/
+wandb/
+hpo/*.db
+hpo/*.db-journal
+
+# ---- Notebook checkpoints ----
+.ipynb_checkpoints/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

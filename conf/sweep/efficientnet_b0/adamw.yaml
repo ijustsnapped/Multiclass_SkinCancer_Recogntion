@@ -1,0 +1,56 @@
+# W&B Bayesian sweep for EfficientNet-B0 + AdamW.
+#
+# Run with W&B sweeps:
+#   wandb sweep conf/sweep/efficientnet_b0/adamw.yaml
+#   wandb agent <entity>/<project>/<sweep_id>
+#
+# Or drive the SAME search space locally with Optuna (no W&B agent needed):
+#   python -m src.hpo conf/sweep/efficientnet_b0/adamw.yaml --n-trials 60
+#
+# Parameter keys are Hydra override paths. `optim`/`model`/`experiment` select a
+# config group; dotted keys (training.optimizer.lr, ...) set values in the
+# composed config. The optim group is packaged into `training`, hence
+# `training.optimizer.*` rather than `optim.*`.
+program: src/train.py
+method: bayes
+metric:
+  name: Val/Sensitivity_macro
+  goal: maximize
+early_terminate:
+  type: hyperband
+  min_iter: 10
+  eta: 3
+command:
+  - ${env}
+  - python
+  - -m
+  - src.train
+  - ${args_no_hyphens}
+parameters:
+  # --- group selection / fixed inputs ---
+  experiment:
+    values: ['b0_ce_sampler']
+  optim:
+    values: ['adamw']
+  training.num_epochs:
+    values: [40]
+  training.batch_size:
+    values: [64]
+  # --- swept optimizer ---
+  training.optimizer.lr:
+    distribution: log_uniform_values
+    min: 1e-05
+    max: 5e-04
+  training.optimizer.weight_decay:
+    distribution: log_uniform_values
+    min: 1e-05
+    max: 1e-03
+  # --- swept training schedule ---
+  training.accum_steps:
+    values: [1, 2, 4]
+  training.backbone_lr_mult:
+    distribution: uniform
+    min: 0.05
+    max: 1.0
+  training.freeze_epochs:
+    values: [0, 2, 5]

@@ -1,0 +1,4 @@
+# @package model
+# DINOv2 ViT-S/14 backbone + linear head (via models.factory.DinoClassifier).
+type: dino_vit_s14
+force_reload_hub: false

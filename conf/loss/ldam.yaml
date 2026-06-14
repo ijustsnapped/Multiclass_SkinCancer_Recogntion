@@ -1,0 +1,11 @@
+# @package training
+# LDAM loss + Deferred Re-Weighting (DRW). drw_schedule_epochs are the epochs at
+# which the class weights are switched on/updated.
+loss:
+  type: ldam
+  ldam_params:
+    max_margin: 0.5
+    use_effective_number_margin: true
+    effective_number_beta: 0.999
+    scale: 30.0
+drw_schedule_epochs: [5, 10]

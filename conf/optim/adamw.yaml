@@ -1,0 +1,9 @@
+# @package training
+optimizer:
+  type: AdamW
+  lr: 3e-4
+  weight_decay: 1e-4
+scheduler:
+  type: CosineAnnealingLR
+  t_max: ${training.num_epochs}
+  min_lr: 0.0
