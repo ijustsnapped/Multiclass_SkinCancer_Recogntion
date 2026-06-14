@@ -115,8 +115,8 @@ wandb sweep conf/sweep/efficientnet_b0/adamw.yaml
 wandb agent <entity>/<project>/<sweep_id>
 ```
 
-Each Optuna trial runs one full fold and returns its best `Val/Sensitivity_macro`.
-There's no mid-trial pruning because the legacy loop only reports a final metric.
+Each Optuna trial runs one full fold and returns its best `val/sensitivity_macro`.
+There's no mid-trial pruning because the loop only reports a final metric.
 
 ## Notes
 - The 8 classes come from `argmax` over the ground-truth one-hot columns;

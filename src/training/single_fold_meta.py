@@ -28,13 +28,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.optim import AdamW, SGD
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.amp import autocast, GradScaler
 
 from tqdm import tqdm
 
-from torchmetrics import AUROC, F1Score, Recall
 from sklearn.metrics import precision_recall_curve, confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 
@@ -51,6 +50,7 @@ from src.utils import (
     configure_logging, epoch_bar, log_epoch, MetricsCSV,
 )
 from src.wandb_ext.media import log_dataset_media
+from src.training._helpers import compute_val_metrics, build_optimizer, build_scheduler
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -242,14 +242,9 @@ def run_training_phase(
                 groups.append({"params": back_params, "lr": base_lr * backbone_lr_mult})
             if not groups:
                 groups = [{"params": model.parameters(), "lr": base_lr}]
-            optimizer = AdamW(groups, lr=groups[0]["lr"], weight_decay=phase_cfg.get("optimizer", {}).get("weight_decay", 1e-4))
-            rem = num_epochs_phase - freeze_epochs
-            if phase_cfg.get("scheduler", {}).get("type", "").lower() == "steplr":
-                step_size = phase_cfg.get("scheduler", {}).get("step_size", 10)
-                gamma = phase_cfg.get("scheduler", {}).get("gamma", 0.1)
-                scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
-            else:
-                scheduler = CosineAnnealingLR(optimizer, T_max=(rem if rem > 0 else 1), eta_min=phase_cfg.get("scheduler", {}).get("min_lr", 0.0))
+            optimizer = build_optimizer(groups, phase_cfg.get("optimizer", {}), groups[0]["lr"])
+            scheduler = build_scheduler(optimizer, phase_cfg.get("scheduler", {}),
+                                        num_epochs_phase - freeze_epochs)
             logger.info(f"[{phase_name}] Unfroze at epoch {epoch}, reinitialized optimizer/scheduler.")
 
         # If using LDAM+DRW, update weights at specified epochs
@@ -426,19 +421,10 @@ def run_training_phase(
             all_true_cat = torch.cat(all_true_list, dim=0)
             avg_val_acc = (all_probs.argmax(dim=1) == all_true_cat).float().mean().item()
 
-            # Compute metrics
-            f1_macro = F1Score(task="multiclass", num_classes=len(label2idx_model), average="macro")(
-                all_probs.argmax(dim=1), all_true_cat
-            ).item()
-            try:
-                auroc_macro = AUROC(task="multiclass", num_classes=len(label2idx_model), average="macro")(
-                    all_probs, all_true_cat
-                ).item()
-            except Exception:
-                auroc_macro = float("nan")
-            sens_macro = Recall(task="multiclass", num_classes=len(label2idx_model), average="macro", zero_division=0)(
-                all_probs.argmax(dim=1), all_true_cat
-            ).item()
+            # Compute metrics (shared helper).
+            _m = compute_val_metrics(all_probs, all_true_cat, len(label2idx_model))
+            f1_macro, auroc_macro, sens_macro = (
+                _m["f1_macro"], _m["auroc_macro"], _m["sensitivity_macro"])
 
             # Unified val scalars (lowercase, split-grouped; phases share one axis).
             tb_logger.writer.add_scalar("val/loss", avg_val_loss, epoch)

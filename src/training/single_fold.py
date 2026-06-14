@@ -30,20 +30,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.optim import AdamW, SGD
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from torch.amp import autocast, GradScaler
 
 from tqdm import tqdm
 
 from sklearn.metrics import precision_recall_curve, confusion_matrix, ConfusionMatrixDisplay
-from torchmetrics import F1Score, AUROC, Recall
 
 # Utilities
 from src.utils.general_utils import set_seed, load_config, cast_config_values
 from src.utils.torch_utils import get_device
 from src.utils.ema import update_ema
 from src.utils.console import configure_logging, epoch_bar, log_epoch, MetricsCSV
+from src.training._helpers import compute_val_metrics, build_optimizer, build_scheduler
 from src.wandb_ext import make_writer
 from src.wandb_ext.media import log_dataset_media
 
@@ -376,23 +374,10 @@ def train_one_fold(
         opt_groups = [{"params": model.parameters(), "lr": base_lr}]
         logger.warning(f"[Fold {fold_id}] No trainable params found; defaulting to all.")
 
-    # Instantiate optimizer
-    optim_type = optim_cfg.get("type", "AdamW").lower()
-    if optim_type == "sgd":
-        optimizer = SGD(opt_groups, lr=base_lr, weight_decay=optim_cfg.get("weight_decay", 1e-4), momentum=optim_cfg.get("momentum", 0.9))
-    else:
-        optimizer = AdamW(opt_groups, lr=base_lr, weight_decay=optim_cfg.get("weight_decay", 1e-4))
-
-    # Scheduler
-    sched_type = sched_cfg.get("type", "cosineannealinglr").lower()
-    if sched_type == "steplr":
-        step_size = sched_cfg.get("step_size", 10)
-        gamma = sched_cfg.get("gamma", 0.1)
-        scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
-    else:  # CosineAnnealingLR
-        t_max = sched_cfg.get("t_max", training_cfg.get("num_epochs", 1))
-        min_lr = sched_cfg.get("min_lr", 0.0)
-        scheduler = CosineAnnealingLR(optimizer, T_max=t_max, eta_min=min_lr)
+    # Optimizer + scheduler (shared builders).
+    optimizer = build_optimizer(opt_groups, optim_cfg, base_lr)
+    scheduler = build_scheduler(
+        optimizer, sched_cfg, sched_cfg.get("t_max", training_cfg.get("num_epochs", 1)))
 
     # ── Choose loss (LDAM, focal CE, or vanilla CE) ──
     loss_type = loss_cfg.get("type", "cross_entropy").lower()
@@ -465,14 +450,8 @@ def train_one_fold(
             else:
                 groups = [{"params": model.parameters(), "lr": base_lr * (backbone_lr_mult if backbone_lr_mult != 1.0 else 1.0)}]
 
-            optimizer = AdamW(groups, lr=groups[0]["lr"], weight_decay=optim_cfg.get("weight_decay", 1e-4))
-            rem = num_epochs - freeze_epochs
-            if sched_type == "steplr":
-                step_size = sched_cfg.get("step_size", 10)
-                gamma = sched_cfg.get("gamma", 0.1)
-                scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
-            else:
-                scheduler = CosineAnnealingLR(optimizer, T_max=(rem if rem > 0 else 1), eta_min=sched_cfg.get("min_lr", 0.0))
+            optimizer = build_optimizer(groups, optim_cfg, groups[0]["lr"])
+            scheduler = build_scheduler(optimizer, sched_cfg, num_epochs - freeze_epochs)
             logger.info(f"[Fold {fold_id}] Unfroze at epoch {epoch}, reinitialized optimizer/scheduler.")
 
         # DRW Weight update (for LDAMLoss)
@@ -587,21 +566,9 @@ def train_one_fold(
             all_true_cat = torch.cat(all_true, dim=0)
             avg_val_acc = (all_probs.argmax(dim=1) == all_true_cat).float().mean().item()
 
-            # F1 (macro) on hard preds
-            f1_macro = F1Score(task="multiclass", num_classes=len(label2idx), average="macro")(
-                all_probs.argmax(dim=1), all_true_cat
-            ).item()
-
-            try:
-                auroc_macro = AUROC(task="multiclass", num_classes=len(label2idx), average="macro")(
-                    all_probs, all_true_cat
-                ).item()
-            except Exception:
-                auroc_macro = float("nan")
-
-            sens_macro = Recall(task="multiclass", num_classes=len(label2idx), average="macro", zero_division=0)(
-                all_probs.argmax(dim=1), all_true_cat
-            ).item()
+            _m = compute_val_metrics(all_probs, all_true_cat, len(label2idx))
+            f1_macro, auroc_macro, sens_macro = (
+                _m["f1_macro"], _m["auroc_macro"], _m["sensitivity_macro"])
 
             writer.add_scalar("val/loss", avg_val_loss, epoch)
             writer.add_scalar("val/acc", avg_val_acc, epoch)
