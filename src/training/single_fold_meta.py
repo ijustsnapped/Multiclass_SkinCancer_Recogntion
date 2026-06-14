@@ -267,9 +267,11 @@ def run_training_phase(
                 criterion.update_weights(None)
 
         # ── Train Loop ──
-        running_loss = 0.0
-        running_correct = 0
+        # GPU-side accumulators: avoid a host-device sync (.item()) every batch.
+        running_loss = torch.zeros((), device=device)
+        running_correct = torch.zeros((), device=device)
         running_total = 0
+        loss_scale = accum_steps_phase if accum_steps_phase > 1 else 1
         optimizer.zero_grad()
 
         pbar = epoch_bar(train_loader, fold=fold_str, epoch=epoch,
@@ -339,27 +341,23 @@ def run_training_phase(
             if timer_active and device.type == 'cuda':
                 epoch_gpu_time_ms += batch_timer.get_elapsed_time_ms()
 
-            batch_loss = loss.item() * (accum_steps_phase if accum_steps_phase > 1 else 1)
-            preds = logits.argmax(dim=1)
-            correct = (preds == labels).sum().item()
             bs = labels.size(0)
-
-            running_loss += batch_loss * bs
-            running_correct += correct
+            running_loss += loss.detach() * loss_scale * bs
+            running_correct += (logits.detach().argmax(dim=1) == labels).sum()
             running_total += bs
 
-            avg_loss = running_loss / running_total if running_total > 0 else 0.0
-            avg_acc = running_correct / running_total if running_total > 0 else 0.0
-
-            pbar.set_postfix(loss=f"{avg_loss:.3f}", acc=f"{avg_acc:.3f}",
-                             lr=f"{optimizer.param_groups[0]['lr']:.1e}")
+            if (batch_idx % 20 == 0) or ((batch_idx + 1) == len(train_loader)):
+                avg_loss = (running_loss / running_total).item()
+                avg_acc = (running_correct / running_total).item()
+                pbar.set_postfix(loss=f"{avg_loss:.3f}", acc=f"{avg_acc:.3f}",
+                                 lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
         pbar.close()
         epoch_duration = time.time() - epoch_start
         scheduler.step()
 
-        epoch_train_loss = running_loss / running_total if running_total > 0 else 0.0
-        epoch_train_acc = running_correct / running_total if running_total > 0 else 0.0
+        epoch_train_loss = (running_loss / running_total).item() if running_total > 0 else 0.0
+        epoch_train_acc = (running_correct / running_total).item() if running_total > 0 else 0.0
         epoch_lr = optimizer.param_groups[0]['lr']
 
         # Epoch-level train scalars (unified schema; phases share one continuous axis).
@@ -368,8 +366,7 @@ def run_training_phase(
         tb_logger.writer.add_scalar("train/lr", epoch_lr, epoch)
 
         # ── Validation Loop ──
-        val_loss_sum = 0.0
-        val_correct = 0
+        val_loss_sum = torch.zeros((), device=device)
         val_seen = 0
         all_logits_list: list[torch.Tensor] = []
         all_true_list: list[torch.Tensor] = []
@@ -382,7 +379,7 @@ def run_training_phase(
             pbar_val = epoch_bar(val_loader, fold=fold_str, epoch=epoch,
                                  n_epochs=start_epoch + num_epochs_phase, split="val", phase=phase_name)
             with torch.no_grad():
-                for batch in pbar_val:
+                for v_idx, batch in enumerate(pbar_val):
                     if len(batch) == 3:
                         imgs_cpu, meta_cpu, labels_cpu = batch
                     elif len(batch) == 2:
@@ -411,29 +408,23 @@ def run_training_phase(
                     with autocast(device_type=device.type, enabled=amp_enabled):
                         logits = eval_model(imgs, meta)
                         loss_v = criterion(logits, labels)
-                        probs = F.softmax(logits, dim=1)
-                    preds = probs.argmax(dim=1)
-                    correct = (preds == labels).sum().item()
                     bs = labels.size(0)
-
-                    val_loss_sum += loss_v.item() * bs
-                    val_correct += correct
+                    val_loss_sum += loss_v.detach() * bs
                     val_seen += bs
 
-                    all_logits_list.append(logits.cpu())
+                    all_logits_list.append(logits.float().cpu())
                     all_true_list.append(labels.cpu())
 
-                    avg_val_loss = val_loss_sum / val_seen if val_seen > 0 else 0.0
-                    avg_val_acc = val_correct / val_seen if val_seen > 0 else 0.0
-                    pbar_val.set_postfix(loss=f"{avg_val_loss:.3f}", acc=f"{avg_val_acc:.3f}")
+                    if (v_idx % 20 == 0) or ((v_idx + 1) == len(val_loader)):
+                        pbar_val.set_postfix(loss=f"{(val_loss_sum / val_seen).item():.3f}")
                 pbar_val.close()
 
-            avg_val_loss = val_loss_sum / val_seen if val_seen > 0 else 0.0
-            avg_val_acc = val_correct / val_seen if val_seen > 0 else 0.0
+            avg_val_loss = (val_loss_sum / val_seen).item() if val_seen > 0 else 0.0
 
             all_logits_cat = torch.cat(all_logits_list, dim=0)
             all_probs = F.softmax(all_logits_cat, dim=1)
             all_true_cat = torch.cat(all_true_list, dim=0)
+            avg_val_acc = (all_probs.argmax(dim=1) == all_true_cat).float().mean().item()
 
             # Compute metrics
             f1_macro = F1Score(task="multiclass", num_classes=len(label2idx_model), average="macro")(

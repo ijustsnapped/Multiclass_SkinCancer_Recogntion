@@ -552,46 +552,40 @@ def train_one_fold(
                 ema_model.eval()
             eval_model = ema_model if (ema_model is not None and training_cfg.get("use_ema_for_val", True)) else model
 
-            val_loss = 0.0
-            val_correct = 0
+            val_loss_sum = torch.zeros((), device=device)
             val_total = 0
             all_logits: list[torch.Tensor] = []
             all_true: list[torch.Tensor] = []
 
             with torch.no_grad():
                 pbar_v = epoch_bar(val_loader, fold=fold_id, epoch=epoch, n_epochs=num_epochs, split="val")
-                for imgs, labels in pbar_v:
+                for batch_idx, (imgs, labels) in enumerate(pbar_v):
                     imgs = imgs.to(device, non_blocking=True)
                     labels = labels.to(device, non_blocking=True)
 
                     with autocast(enabled=use_amp, device_type=device.type):
                         logits = eval_model(imgs)
                         loss = criterion(logits, labels)
-                        probs = F.softmax(logits, dim=1)
 
-                    preds = probs.argmax(dim=1)
-                    correct = (preds == labels).sum().item()
                     bs = labels.size(0)
-
-                    val_loss += loss.item() * bs
-                    val_correct += correct
+                    val_loss_sum += loss.detach() * bs
                     val_total += bs
 
-                    all_logits.append(logits.cpu())
+                    # Keep logits/labels for the epoch-level metrics (AUROC needs probs);
+                    # the per-batch softmax/accuracy is computed once from these below.
+                    all_logits.append(logits.float().cpu())
                     all_true.append(labels.cpu())
 
-                    avg_val_loss = val_loss / val_total if val_total > 0 else 0.0
-                    avg_val_acc = val_correct / val_total if val_total > 0 else 0.0
-
-                    pbar_v.set_postfix(loss=f"{avg_val_loss:.3f}", acc=f"{avg_val_acc:.3f}")
+                    if (batch_idx % 20 == 0) or ((batch_idx + 1) == len(val_loader)):
+                        pbar_v.set_postfix(loss=f"{(val_loss_sum / val_total).item():.3f}")
                 pbar_v.close()
 
-            avg_val_loss = val_loss / val_total if val_total > 0 else 0.0
-            avg_val_acc = val_correct / val_total if val_total > 0 else 0.0
+            avg_val_loss = (val_loss_sum / val_total).item() if val_total > 0 else 0.0
 
             all_logits_cat = torch.cat(all_logits, dim=0)
             all_probs = F.softmax(all_logits_cat, dim=1)
             all_true_cat = torch.cat(all_true, dim=0)
+            avg_val_acc = (all_probs.argmax(dim=1) == all_true_cat).float().mean().item()
 
             # F1 (macro) on hard preds
             f1_macro = F1Score(task="multiclass", num_classes=len(label2idx), average="macro")(
