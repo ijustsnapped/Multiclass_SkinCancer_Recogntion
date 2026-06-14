@@ -1,0 +1,18 @@
+# @package _global_
+# EfficientNet-B0 + concatenation metadata fusion (age / sex / anatomical site).
+defaults:
+  - override /model: efficientnet_b0
+  - override /optim: adamw
+  - override /loss: cross_entropy
+  - override /sampler: class_balanced_sqrt
+  - override /training_mode: image_meta
+
+experiment_setup:
+  experiment_name: b0_meta
+
+model:
+  meta_fusion: concat
+
+training:
+  num_epochs: 40
+  batch_size: 64

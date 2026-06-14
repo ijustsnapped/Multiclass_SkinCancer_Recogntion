@@ -21,8 +21,9 @@ import hydra
 import pandas as pd
 from omegaconf import DictConfig
 
-# Legacy trainer: reuse its fold loop + path helper verbatim.
+# Legacy trainers: reuse their fold loops + path helper verbatim.
 from src.training import single_fold as legacy
+from src.training import single_fold_meta as meta_trainer
 from src.config_bridge import to_legacy_cfg
 from src.wandb_ext import init_wandb, finish_wandb
 from src.utils.general_utils import set_seed

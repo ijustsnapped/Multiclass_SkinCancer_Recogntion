@@ -10,35 +10,11 @@ Weights & Biases and Optuna on top.
 
 ## Layout
 
-```
-conf/         Hydra configs, composed from groups
-  config.yaml     root defaults
-  dataset/        data paths + augmentations
-  model/          backbones (efficientnet_b0/b3, dino_vit_s14)
-  optim/          optimizers + schedulers
-  loss/           cross_entropy, focal, ldam(+DRW)
-  sampler/        default, class_balanced_sqrt
-  wandb/          W&B settings
-  experiment/     full presets (b0_ce_sampler, b3_ldam)
-  sweep/          search spaces
-src/
-  train.py        Hydra entrypoint -> training.single_fold.train_one_fold
-  hpo.py          Optuna (TPE) runner
-  config_bridge.py  Hydra cfg -> legacy nested-dict config
-  wandb_ext/      W&B init + TensorBoard mirror
-  data/           datasets, transforms, samplers
-  models/         model factory + metadata-fusion heads
-  losses/         focal + LDAM
-  utils/          EMA, logging, stats, cropping
-  training/       training loops (run as modules)
-    single_fold.py        single fold
-    cv.py                 k-fold
-    single_fold_meta.py   single fold + metadata
-    cv_meta.py            k-fold + metadata
-scripts/      dataset download + prep
-notebooks/    EDA
-configs/      original hand-written YAML configs
-```
+- `conf/` — Hydra configs (dataset, model, optim, loss, sampler, experiment, sweep)
+- `src/` — code: `train.py`, `hpo.py`, and the `training/` loops, plus data/models/losses/utils
+- `scripts/` — dataset download + prep
+- `configs/` — original hand-written YAML configs
+- `notebooks/` — EDA
 
 `splits/`, `data/`, `outputs/`, `wandb/`, and `hpo/*.db` are git-ignored.
 
