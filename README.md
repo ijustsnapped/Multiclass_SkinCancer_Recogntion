@@ -1,5 +1,7 @@
 # Multiclass Skin Cancer Recognition (ISIC 2019)
 
+> Deep Learning 2024/2025 class Project.
+
 8-class dermoscopy lesion classifier for the ISIC 2019 dataset
 (AK, BCC, BKL, DF, MEL, NV, SCC, VASC).
 
@@ -7,8 +9,6 @@ Backbones: EfficientNet and DINOv2. Handles class imbalance (LDAM + DRW,
 focal loss, class-balanced sampling), optional metadata fusion (age / sex /
 site), EMA, AMP, and TensorBoard. Experiments run through Hydra, with
 Weights & Biases and Optuna on top.
-
-> Deep Learning 2024/2025 class Project.
 
 
 ## Layout
