@@ -5,7 +5,7 @@ paths:
   labels_csv: splits/training/labels.csv
   train_root: splits/training
   meta_csv: splits/training/hot_one_meta.csv
-  log_dir: outputs/tensorboard
+  log_dir: outputs/logs        # per-fold metrics.csv + W&B run artifacts (no TensorBoard)
   ckpt_dir: outputs/checkpoints
 
 data:
@@ -22,14 +22,10 @@ data:
     train:
       random_horizontal_flip_p: 0.5
       random_vertical_flip_p: 0.5
-      affine_degrees: 15
-      affine_translate: [0.05, 0.05]
-      affine_scale_range: [0.9, 1.1]
-      affine_shear_degrees: 10
-      color_jitter_brightness: 0.1
-      color_jitter_contrast: 0.1
-      color_jitter_saturation: 0.1
-      color_jitter_hue: 0.1
+      # RandAugment already samples geometric (rotate/shear/translate) and photometric
+      # (brightness/contrast/color/sharpness) ops, so stacking RandomAffine + ColorJitter
+      # on top is redundant CPU work (~2x the per-image transform cost) and over-distorts.
+      # Keep flips + RandAugment. Re-add affine_*/color_jitter_* below to opt back in.
       rand_aug_n: 2
       rand_aug_m: 9
   gpu_augmentations:

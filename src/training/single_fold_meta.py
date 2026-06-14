@@ -47,15 +47,12 @@ from src.losses import focal_ce_loss, LDAMLoss
 from src.utils import (
     set_seed, load_config, cast_config_values,
     update_ema,
-    get_device, CudaTimer, TensorBoardLogger
+    get_device, CudaTimer, TensorBoardLogger,
+    configure_logging, epoch_bar, log_epoch, MetricsCSV,
 )
+from src.wandb_ext.media import log_dataset_media
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    force=True
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -175,6 +172,7 @@ def run_training_phase(
     start_epoch: int = 0,
     ema_model: CNNWithMetadata | None = None,
     initial_best_metric: float = -float('inf'),
+    metrics_csv: MetricsCSV | None = None,
 ) -> tuple[float, int, str]:
     """
     Single‐phase training loop. Used for both:
@@ -274,7 +272,8 @@ def run_training_phase(
         running_total = 0
         optimizer.zero_grad()
 
-        pbar = tqdm(train_loader, desc=f"F{fold_str} E{epoch} {phase_name} Train", ncols=cfg.get("experiment_setup", {}).get("TQDM_NCOLS", 120), leave=False)
+        pbar = epoch_bar(train_loader, fold=fold_str, epoch=epoch,
+                         n_epochs=start_epoch + num_epochs_phase, split="train", phase=phase_name)
         epoch_gpu_time_ms = 0.0
         epoch_start = time.time()
         for batch_idx, batch in enumerate(pbar):
@@ -314,7 +313,7 @@ def run_training_phase(
                 meta = meta * (1.0 - prob_mask)
 
             timer_active = False
-            if cfg.get("tensorboard_logging", {}).get("profiler", {}).get("enable_batch_timing_always", False):
+            if cfg.get("logging", cfg.get("tensorboard_logging", {})).get("profiler", {}).get("enable_batch_timing_always", False):
                 timer_active = True
             if timer_active and device.type == 'cuda':
                 batch_timer = CudaTimer(device)
@@ -352,16 +351,8 @@ def run_training_phase(
             avg_loss = running_loss / running_total if running_total > 0 else 0.0
             avg_acc = running_correct / running_total if running_total > 0 else 0.0
 
-            pbar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{avg_acc:.4f}")
-
-            # Log batch‐level metrics
-            if tb_logger and tb_logger.writer:
-                interval = getattr(tb_logger, "log_interval_batches_train", None)
-                if interval is not None and (batch_idx % interval == 0):
-                    step = epoch * len(train_loader) + batch_idx
-                    tb_logger.writer.add_scalar(f"Train/Loss_batch_{phase_name}", avg_loss, step)
-                    tb_logger.writer.add_scalar(f"Train/Acc_batch_{phase_name}", avg_acc, step)
-                    tb_logger.writer.add_scalar(f"Train/LR_{phase_name}", optimizer.param_groups[0]['lr'], step)
+            pbar.set_postfix(loss=f"{avg_loss:.3f}", acc=f"{avg_acc:.3f}",
+                             lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
         pbar.close()
         epoch_duration = time.time() - epoch_start
@@ -369,15 +360,12 @@ def run_training_phase(
 
         epoch_train_loss = running_loss / running_total if running_total > 0 else 0.0
         epoch_train_acc = running_correct / running_total if running_total > 0 else 0.0
+        epoch_lr = optimizer.param_groups[0]['lr']
 
-        # Log epoch‐level metrics
-        if tb_logger and tb_logger.writer:
-            tb_logger.writer.add_scalar(f"Train/Loss_epoch_{phase_name}", epoch_train_loss, epoch)
-            tb_logger.writer.add_scalar(f"Train/Acc_epoch_{phase_name}", epoch_train_acc, epoch)
-            tb_logger.writer.add_scalar(f"Train/LR_epoch_{phase_name}", optimizer.param_groups[0]['lr'], epoch)
-            tb_logger.writer.add_scalar(f"Time/Train_epoch_duration_sec_{phase_name}", epoch_duration, epoch)
-            if device.type == 'cuda':
-                tb_logger.writer.add_scalar(f"Time/GPU_ms_per_train_epoch_{phase_name}", epoch_gpu_time_ms, epoch)
+        # Epoch-level train scalars (unified schema; phases share one continuous axis).
+        tb_logger.writer.add_scalar("train/loss", epoch_train_loss, epoch)
+        tb_logger.writer.add_scalar("train/acc", epoch_train_acc, epoch)
+        tb_logger.writer.add_scalar("train/lr", epoch_lr, epoch)
 
         # ── Validation Loop ──
         val_loss_sum = 0.0
@@ -391,7 +379,8 @@ def run_training_phase(
         if do_val:
             eval_model = ema_model if (ema_model is not None and use_ema_for_val and phase_name == "P1_Joint") else model
             eval_model.eval()
-            pbar_val = tqdm(val_loader, desc=f"F{fold_str} E{epoch} {phase_name} Val", ncols=cfg.get("experiment_setup", {}).get("TQDM_NCOLS", 120), leave=False)
+            pbar_val = epoch_bar(val_loader, fold=fold_str, epoch=epoch,
+                                 n_epochs=start_epoch + num_epochs_phase, split="val", phase=phase_name)
             with torch.no_grad():
                 for batch in pbar_val:
                     if len(batch) == 3:
@@ -436,7 +425,7 @@ def run_training_phase(
 
                     avg_val_loss = val_loss_sum / val_seen if val_seen > 0 else 0.0
                     avg_val_acc = val_correct / val_seen if val_seen > 0 else 0.0
-                    pbar_val.set_postfix(val_loss=f"{avg_val_loss:.4f}", val_acc=f"{avg_val_acc:.4f}")
+                    pbar_val.set_postfix(loss=f"{avg_val_loss:.3f}", acc=f"{avg_val_acc:.3f}")
                 pbar_val.close()
 
             avg_val_loss = val_loss_sum / val_seen if val_seen > 0 else 0.0
@@ -456,29 +445,16 @@ def run_training_phase(
                 ).item()
             except Exception:
                 auroc_macro = float("nan")
-            try:
-                pauc_macro = AUROC(task="multiclass", num_classes=len(label2idx_model), average="macro", max_fpr=main_cfg.get("pauc_max_fpr", 0.2))(
-                    all_probs, all_true_cat
-                ).item()
-            except Exception:
-                pauc_macro = float("nan")
             sens_macro = Recall(task="multiclass", num_classes=len(label2idx_model), average="macro", zero_division=0)(
                 all_probs.argmax(dim=1), all_true_cat
             ).item()
 
-            if tb_logger and tb_logger.writer:
-                tb_logger.writer.add_scalar(f"Val/Loss_epoch_{phase_name}", avg_val_loss, epoch)
-                tb_logger.writer.add_scalar(f"Val/Acc_epoch_{phase_name}", avg_val_acc, epoch)
-                tb_logger.writer.add_scalar(f"Val/F1_macro_{phase_name}", f1_macro, epoch)
-                tb_logger.writer.add_scalar(f"Val/AUROC_macro_{phase_name}", auroc_macro, epoch)
-                tb_logger.writer.add_scalar(f"Val/pAUROC@{main_cfg.get('pauc_max_fpr', 0.2)}_{phase_name}", pauc_macro, epoch)
-                tb_logger.writer.add_scalar(f"Val/Sensitivity_macro_{phase_name}", sens_macro, epoch)
-
-            logger.info(
-                f"[F{fold_str}][E{epoch}][{phase_name}] Val → "
-                f"Loss={avg_val_loss:.4f} Acc={avg_val_acc:.4f} "
-                f"F1={f1_macro:.4f} AUROC={auroc_macro:.4f} Sens={sens_macro:.4f}"
-            )
+            # Unified val scalars (lowercase, split-grouped; phases share one axis).
+            tb_logger.writer.add_scalar("val/loss", avg_val_loss, epoch)
+            tb_logger.writer.add_scalar("val/acc", avg_val_acc, epoch)
+            tb_logger.writer.add_scalar("val/f1_macro", f1_macro, epoch)
+            tb_logger.writer.add_scalar("val/auroc_macro", auroc_macro, epoch)
+            tb_logger.writer.add_scalar("val/sensitivity_macro", sens_macro, epoch)
 
             # Optional: save PR‐curve thresholds
             save_pr = main_cfg.get("save_optimal_thresholds_from_pr", False)
@@ -499,8 +475,7 @@ def run_training_phase(
                             opt_thresholds[cls_i] = 0.5
                     except Exception:
                         opt_thresholds[cls_i] = 0.5
-                if tb_logger and tb_logger.writer:
-                    tb_logger.writer.add_text(f"{phase_name}/optimal_thresholds", str(opt_thresholds), epoch)
+                tb_logger.writer.add_text("val/optimal_thresholds", str(opt_thresholds), epoch)
 
             # Primary metric selection
             metric_map = {
@@ -510,12 +485,12 @@ def run_training_phase(
             }
             current_primary = metric_map.get(model_sel_metric, sens_macro)
 
-            if current_primary > best_metric:
+            is_best = current_primary > best_metric
+            if is_best:
                 best_metric = current_primary
                 best_epoch = epoch
                 ckpt_name = f"{exp_name}_fold{fold_str}_{phase_name}_best.pt"
                 best_ckpt_path = str(ckpt_dir_phase / ckpt_name)
-                logger.info(f"New best [{phase_name}] ({model_sel_metric}) = {best_metric:.4f} at E{epoch}. Saving → {best_ckpt_path}")
 
                 ckpt_data: dict = {
                     "epoch": epoch,
@@ -539,20 +514,26 @@ def run_training_phase(
             else:
                 early_stop_patience_phase -= 1
 
+            # One concise summary line + CSV row per validated epoch.
+            log_epoch(fold=fold_str, epoch=epoch, n_epochs=start_epoch + num_epochs_phase,
+                      train_loss=epoch_train_loss, train_acc=epoch_train_acc,
+                      val_loss=avg_val_loss, val_acc=avg_val_acc,
+                      f1=f1_macro, auroc=auroc_macro, sens=sens_macro,
+                      lr=epoch_lr, seconds=epoch_duration, is_best=is_best, phase=phase_name)
+            if metrics_csv is not None:
+                metrics_csv.append(epoch=epoch, phase=phase_name,
+                                   train_loss=epoch_train_loss, train_acc=epoch_train_acc,
+                                   val_loss=avg_val_loss, val_acc=avg_val_acc,
+                                   f1_macro=f1_macro, auroc_macro=auroc_macro,
+                                   sensitivity_macro=sens_macro,
+                                   lr=epoch_lr, is_best=int(is_best))
+
             if early_stop_patience_phase <= 0:
                 logger.info(f"[{phase_name}] Early stopping at E{epoch}.")
                 break
 
             model.train()
 
-        # End epoch
-        if tb_logger:
-            tb_logger.log_epoch_summary({
-                f"Loss/train_epoch_{phase_name}": epoch_train_loss,
-                f"Accuracy/train_epoch_{phase_name}": epoch_train_acc,
-                f"LearningRate/epoch_{phase_name}": optimizer.param_groups[0]['lr'],
-                f"Time/Train_epoch_duration_sec_{phase_name}": epoch_duration
-            }, epoch)
         if early_stop_patience_phase <= 0:
             break
 
@@ -606,9 +587,10 @@ def train_one_fold_with_meta(
     training_cfg = cfg.get("training", {})
     meta_tune_cfg = cfg.get("meta_tuning", {})
 
-    # Build TensorBoard logger
+    # Run logger (W&B backend) + per-fold metrics CSV (offline record).
     tb_train_len = (len(train_df) + training_cfg.get("batch_size", 32) - 1) // training_cfg.get("batch_size", 32)
     tb_logger = TensorBoardLogger(log_dir=log_dir, experiment_config=cfg, train_loader_len=tb_train_len)
+    metrics_csv = MetricsCSV(log_dir / "metrics.csv")
 
     # Transforms
     tf_train = build_transform(data_cfg.get("cpu_augmentations", {}), train=True)
@@ -639,6 +621,13 @@ def train_one_fold_with_meta(
         tf=tf_val,
         **dataset_args
     )
+
+    # One-time W&B visuals: augmented samples, per-class examples, aug variety.
+    log_cfg = cfg.get("logging", cfg.get("tensorboard_logging", {}))
+    if log_cfg.get("media", {}).get("enable", True):
+        log_dataset_media(train_df, image_root, label2idx_model,
+                          data_cfg.get("cpu_augmentations", {}),
+                          image_loader=data_cfg.get("image_loader", "pil"))
 
     # Record metadata_dim for model creation
     metadata_dim = train_ds.metadata_dim
@@ -759,7 +748,8 @@ def train_one_fold_with_meta(
         exp_name=exp_name,
         start_epoch=0,
         ema_model=ema_model,
-        initial_best_metric=-float('inf')
+        initial_best_metric=-float('inf'),
+        metrics_csv=metrics_csv,
     )
 
     overall_best_metric = best_metric_p1
@@ -849,7 +839,8 @@ def train_one_fold_with_meta(
                 exp_name=exp_name,
                 start_epoch=best_epoch_p1 + 1,
                 ema_model=ema_model,
-                initial_best_metric=best_metric_p1
+                initial_best_metric=best_metric_p1,
+                metrics_csv=metrics_csv,
             )
 
             if best_metric_p2 > overall_best_metric:

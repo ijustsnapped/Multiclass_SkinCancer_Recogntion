@@ -1,9 +1,14 @@
 # src/utils/tb_logger.py
+#
+# Despite the name, this no longer writes TensorBoard event files: the backend is
+# a ``WandbWriter`` that forwards scalars/media to the active W&B run (or no-ops).
+# The class is kept so the meta trainer and the legacy cv*.py loops keep working
+# unchanged; only the writer backend changed.
 from __future__ import annotations
 import logging
 from pathlib import Path
 import torch
-from torch.utils.tensorboard import SummaryWriter
+from src.wandb_ext.writer import WandbWriter
 from torchvision.utils import make_grid
 import numpy as np
 
@@ -43,18 +48,16 @@ def denormalize_image(tensor: torch.Tensor, mean: list[float], std: list[float])
 class TensorBoardLogger:
     def __init__(self, log_dir: str | Path, experiment_config: dict, train_loader_len: int):
         self.cfg_main = experiment_config
-        self.cfg_tb = self.cfg_main.get("tensorboard_logging", {})
+        # New `logging:` block (falls back to the legacy `tensorboard_logging:` key).
+        self.cfg_tb = self.cfg_main.get("logging", self.cfg_main.get("tensorboard_logging", {}))
         self.writer = None
         self.global_train_step = 0
         self.global_val_step = 0
         self.train_loader_len = train_loader_len
 
-        if not self.cfg_tb.get("enable", False):
-            logger.info("TensorBoard logging is disabled in the configuration.")
-            return
-
-        self.writer = SummaryWriter(str(log_dir))
-        logger.info(f"TensorBoard logger initialized. Logging to: {log_dir}")
+        # Always attach the W&B writer; it no-ops when no run is active.
+        self.writer = WandbWriter()
+        logger.info("Run logger initialized (W&B backend).")
 
         # Image logging config
         self.img_log_cfg = self.cfg_tb.get("image_logging", {})

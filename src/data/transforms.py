@@ -90,6 +90,13 @@ def build_transform(cfg_cpu_aug: dict, train: bool) -> transforms.Compose:
         rand_aug_n_cfg = train_specific_cfg.get("rand_aug_n")
         rand_aug_m_cfg = train_specific_cfg.get("rand_aug_m")
         if rand_aug_n_cfg is not None and rand_aug_m_cfg is not None:
+            if affine_kwargs or cj_kwargs:
+                logger.warning(
+                    "  RandAugment is stacked on top of RandomAffine/ColorJitter; these "
+                    "overlap (RandAugment already does geometric+photometric ops), which "
+                    "roughly doubles per-image CPU augmentation cost and over-distorts. "
+                    "Consider dropping affine_*/color_jitter_* from the config."
+                )
             tf_list.append(RandAugment(num_ops=rand_aug_n_cfg, magnitude=rand_aug_m_cfg))
             logger.info(f"  Added RandAugment (N={rand_aug_n_cfg}, M={rand_aug_m_cfg})")
 

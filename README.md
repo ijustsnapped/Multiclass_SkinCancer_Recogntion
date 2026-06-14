@@ -7,8 +7,8 @@
 
 Backbones: EfficientNet and DINOv2. Handles class imbalance (LDAM + DRW,
 focal loss, class-balanced sampling), optional metadata fusion (age / sex /
-site), EMA, AMP, and TensorBoard. Experiments run through Hydra, with
-Weights & Biases and Optuna on top.
+site), EMA, and AMP. Experiments run through Hydra, with Weights & Biases
+(metrics + media) and Optuna on top.
 
 
 ## Layout
@@ -81,7 +81,7 @@ python -m src.train experiment=b3_ldam       # a preset
 python -m src.train model=efficientnet_b3 optim=sgd loss=ldam
 python -m src.train run.fold_id=2            # validate on fold 2
 python -m src.train run.all_folds=true       # cross-validate
-python -m src.train wandb.enable=false       # TensorBoard only
+python -m src.train wandb.enable=false       # no W&B (terminal + metrics.csv only)
 ```
 
 Metadata fusion (age / sex / anatomical site, opt-in — needs `hot_one_meta.csv`):
@@ -93,8 +93,10 @@ python -m src.train training_mode=image_meta model.meta_fusion=metablock
 ```
 
 Hydra composes the nested-dict config that the legacy `train_one_fold` expects,
-so no training code is duplicated. W&B logging works by mirroring every
-TensorBoard scalar to the active run. Run `wandb login` once first.
+so no training code is duplicated. Per-epoch metrics log straight to W&B under
+`train/*` and `val/*` (plus augmented-sample / per-class / GradCAM media), and to
+a per-fold `outputs/logs/.../metrics.csv` that survives `wandb.enable=false`. Run
+`wandb login` once first.
 
 ## 4. Hyperparameter optimization
 

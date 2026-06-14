@@ -9,7 +9,7 @@ Usage:
     python -m src.train wandb.enable=false               # no W&B
 
 Composition (conf/) yields the exact nested dict the legacy ``train_one_fold``
-consumes; W&B logging is layered on by mirroring TensorBoard scalars.
+consumes; metrics/media are logged directly to Weights & Biases.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _run_fold(cfg: dict, fold_id, exp_name: str, base_path: Path, seed: int,
     fold_str = str(fold_id).replace(" ", "_").replace("/", "-")
     training_mode = cfg.get("training_mode", "image")
 
-    log_dir = (legacy._get_path_from_config(cfg, "log_dir", "outputs/tensorboard", base_path)
+    log_dir = (legacy._get_path_from_config(cfg, "log_dir", "outputs/logs", base_path)
                / exp_name / f"fold_{fold_str}" / timestamp)
     ckpt_dir = (legacy._get_path_from_config(cfg, "ckpt_dir", "outputs/checkpoints", base_path)
                 / exp_name / f"fold_{fold_str}" / timestamp)

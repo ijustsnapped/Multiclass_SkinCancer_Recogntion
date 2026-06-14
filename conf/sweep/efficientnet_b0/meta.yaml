@@ -18,7 +18,7 @@
 program: src/train.py
 method: bayes
 metric:
-  name: Val/Sensitivity_macro_P1_Joint   # Phase-1 joint CNN+meta training
+  name: val/sensitivity_macro   # unified schema (shared by image + meta paths)
   goal: maximize
 early_terminate:
   type: hyperband

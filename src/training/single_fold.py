@@ -18,6 +18,7 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 import argparse
 import copy
 import logging
+import time
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +33,6 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW, SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from torch.amp import autocast, GradScaler
-from torch.utils.tensorboard import SummaryWriter
 
 from tqdm import tqdm
 
@@ -43,6 +43,9 @@ from torchmetrics import F1Score, AUROC, Recall
 from src.utils.general_utils import set_seed, load_config, cast_config_values
 from src.utils.torch_utils import get_device
 from src.utils.ema import update_ema
+from src.utils.console import configure_logging, epoch_bar, log_epoch, MetricsCSV
+from src.wandb_ext import make_writer
+from src.wandb_ext.media import log_dataset_media
 
 # Data handling
 from src.data.datasets import FlatDataset
@@ -57,12 +60,7 @@ from src.losses.custom_losses import LDAMLoss
 
 import matplotlib.pyplot as plt
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -223,7 +221,7 @@ def train_one_fold(
     model_cfg = cfg.get("model", {})
     training_cfg = cfg.get("training", {})
     data_cfg = cfg.get("data", {})
-    tb_cfg = cfg.get("tensorboard_logging", {})
+    log_cfg = cfg.get("logging", cfg.get("tensorboard_logging", {}))
 
     # Loss config
     loss_cfg = training_cfg.get("loss", {})
@@ -233,12 +231,11 @@ def train_one_fold(
     optim_cfg = training_cfg.get("optimizer", {})
     sched_cfg = training_cfg.get("scheduler", {})
 
-    # Logging setup
+    # Logging setup: scalars/media -> W&B (no-op if no active run); metrics also
+    # to a plain-text per-fold CSV that survives when W&B is disabled.
     logger.info(f"[Fold {fold_id}] Starting. Logs → {log_dir}, Ckpts → {ckpt_dir}")
-    writer = None
-    if tb_cfg.get("enable", False):
-        writer = SummaryWriter(str(log_dir))
-        logger.info(f"[Fold {fold_id}] TensorBoard enabled at {log_dir}")
+    writer = make_writer()
+    metrics_csv = MetricsCSV(log_dir / "metrics.csv")
 
     # ── Transforms & Datasets ──
     cpu_aug = data_cfg.get("cpu_augmentations", {})
@@ -297,6 +294,11 @@ def train_one_fold(
         train_loader = DataLoader(train_ds, shuffle=True, **dl_kwargs)
 
     val_loader = DataLoader(val_ds, shuffle=False, **dl_kwargs)
+
+    # One-time W&B visuals: augmented samples, per-class examples, aug variety.
+    if log_cfg.get("media", {}).get("enable", True):
+        log_dataset_media(train_df, train_root, label2idx, cpu_aug,
+                          image_loader=data_cfg.get("image_loader", "pil"))
 
     # ── Model + EMA ──
     model_cfg = model_cfg.copy()
@@ -430,7 +432,6 @@ def train_one_fold(
     early_stop_patience = training_cfg.get("early_stopping_patience", 10)
     save_thresh = training_cfg.get("save_optimal_thresholds", False)
     model_sel_metric = training_cfg.get("model_selection_metric", "mean_optimal_sensitivity").lower()
-    pauc_max_fpr = training_cfg.get("pauc_max_fpr", 0.2)
 
     best_metric = -float("inf")
     patience_counter = 0
@@ -438,6 +439,7 @@ def train_one_fold(
 
     # ── Epoch Loop ──
     for epoch in range(num_epochs):
+        epoch_start = time.time()
         model.train()
         # Unfreeze at freeze_epochs
         if (freeze_epochs > 0) and (epoch == freeze_epochs):
@@ -487,12 +489,15 @@ def train_one_fold(
             criterion.update_weights(None)
 
         # ── Train Loop ──
-        running_loss = 0.0
-        running_correct = 0
+        # Accumulate loss/correct as GPU tensors so we avoid a host-device sync
+        # (.item()) every batch; we only read them back once, after the epoch.
+        running_loss = torch.zeros((), device=device)
+        running_correct = torch.zeros((), device=device)
         running_total = 0
+        scaling = accum_steps if accum_steps > 1 else 1
         optimizer.zero_grad()
 
-        pbar = tqdm(train_loader, desc=f"Fold {fold_id} E{epoch} Train", ncols=exp_setup_cfg.get("TQDM_NCOLS", 100), leave=False)
+        pbar = epoch_bar(train_loader, fold=fold_id, epoch=epoch, n_epochs=num_epochs, split="train")
         for batch_idx, (imgs, labels) in enumerate(pbar):
             imgs = imgs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -506,9 +511,6 @@ def train_one_fold(
                 if accum_steps > 1:
                     loss = loss / accum_steps
 
-                # Convert to probabilities for metrics
-                probs = F.softmax(logits, dim=1)
-
             scaler.scale(loss).backward()
 
             if ((batch_idx + 1) % accum_steps == 0) or ((batch_idx + 1) == len(train_loader)):
@@ -518,40 +520,29 @@ def train_one_fold(
                 if ema_model is not None:
                     update_ema(ema_model, model, ema_decay)
 
-            preds = probs.argmax(dim=1)
-            correct = (preds == labels).sum().item()
+            # argmax(logits) == argmax(softmax(logits)); skip the softmax.
             bs = labels.size(0)
-            # Since CrossEntropyLoss is mean-reduced, multiply by batch size to accumulate total
-            scaling = accum_steps if accum_steps > 1 else 1
-            running_loss += loss.item() * bs * scaling
-            running_correct += correct
+            running_loss += loss.detach() * bs * scaling
+            running_correct += (logits.detach().argmax(dim=1) == labels).sum()
             running_total += bs
 
-            avg_loss = running_loss / running_total if running_total > 0 else 0.0
-            avg_acc = running_correct / running_total if running_total > 0 else 0.0
-
-            pbar.set_postfix({
-                "loss": f"{avg_loss:.4f}",
-                "acc": f"{avg_acc:.4f}"
-            })
-
-            # Batch-level TensorBoard logging
-            if writer and (tb_cfg.get("log_interval_batches_train", 0) > 0):
-                interval = tb_cfg["log_interval_batches_train"]
-                if (batch_idx + 1) % interval == 0:
-                    step = epoch * len(train_loader) + batch_idx
-                    writer.add_scalar("Train/Loss_batch", avg_loss, step)
-                    writer.add_scalar("Train/Acc_batch", avg_acc, step)
+            # Refresh the bar occasionally; reading the GPU tensors syncs, so don't
+            # do it every batch.
+            if (batch_idx % 20 == 0) or ((batch_idx + 1) == len(train_loader)):
+                avg_loss = (running_loss / running_total).item()
+                avg_acc = (running_correct / running_total).item()
+                pbar.set_postfix(loss=f"{avg_loss:.3f}", acc=f"{avg_acc:.3f}",
+                                 lr=f"{optimizer.param_groups[0]['lr']:.1e}")
 
         pbar.close()
-        epoch_loss = running_loss / running_total if running_total > 0 else 0.0
-        epoch_acc = running_correct / running_total if running_total > 0 else 0.0
+        epoch_loss = (running_loss / running_total).item() if running_total > 0 else 0.0
+        epoch_acc = (running_correct / running_total).item() if running_total > 0 else 0.0
+        epoch_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
 
-        if writer:
-            writer.add_scalar("Train/Loss_epoch", epoch_loss, epoch)
-            writer.add_scalar("Train/Acc_epoch", epoch_acc, epoch)
-            writer.add_scalar("Train/LR", optimizer.param_groups[0]["lr"], epoch)
+        writer.add_scalar("train/loss", epoch_loss, epoch)
+        writer.add_scalar("train/acc", epoch_acc, epoch)
+        writer.add_scalar("train/lr", epoch_lr, epoch)
 
         # ── Validation Loop ──
         do_val = ((epoch % val_interval) == 0) or (epoch == num_epochs - 1)
@@ -568,7 +559,7 @@ def train_one_fold(
             all_true: list[torch.Tensor] = []
 
             with torch.no_grad():
-                pbar_v = tqdm(val_loader, desc=f"Fold {fold_id} E{epoch} Val", ncols=exp_setup_cfg.get("TQDM_NCOLS", 100), leave=False)
+                pbar_v = epoch_bar(val_loader, fold=fold_id, epoch=epoch, n_epochs=num_epochs, split="val")
                 for imgs, labels in pbar_v:
                     imgs = imgs.to(device, non_blocking=True)
                     labels = labels.to(device, non_blocking=True)
@@ -592,10 +583,7 @@ def train_one_fold(
                     avg_val_loss = val_loss / val_total if val_total > 0 else 0.0
                     avg_val_acc = val_correct / val_total if val_total > 0 else 0.0
 
-                    pbar_v.set_postfix({
-                        "val_loss": f"{avg_val_loss:.4f}",
-                        "val_acc": f"{avg_val_acc:.4f}"
-                    })
+                    pbar_v.set_postfix(loss=f"{avg_val_loss:.3f}", acc=f"{avg_val_acc:.3f}")
                 pbar_v.close()
 
             avg_val_loss = val_loss / val_total if val_total > 0 else 0.0
@@ -617,35 +605,19 @@ def train_one_fold(
             except Exception:
                 auroc_macro = float("nan")
 
-            try:
-                # pAUROC @ max_fpr
-                pauc = AUROC(task="multiclass", num_classes=len(label2idx), average="macro", max_fpr=pauc_max_fpr)(
-                    all_probs, all_true_cat
-                ).item()
-            except Exception:
-                pauc = float("nan")
-
             sens_macro = Recall(task="multiclass", num_classes=len(label2idx), average="macro", zero_division=0)(
                 all_probs.argmax(dim=1), all_true_cat
             ).item()
 
-            if writer:
-                writer.add_scalar("Val/Loss_epoch", avg_val_loss, epoch)
-                writer.add_scalar("Val/Acc_epoch", avg_val_acc, epoch)
-                writer.add_scalar("Val/F1_macro", f1_macro, epoch)
-                writer.add_scalar("Val/AUROC_macro", auroc_macro, epoch)
-                writer.add_scalar(f"Val/pAUROC@{pauc_max_fpr}", pauc, epoch)
-                writer.add_scalar("Val/Sensitivity_macro", sens_macro, epoch)
-
-            logger.info(
-                f"[Fold {fold_id}][Epoch {epoch}] Val → "
-                f"Loss={avg_val_loss:.4f} Acc={avg_val_acc:.4f} "
-                f"F1={f1_macro:.4f} AUROC={auroc_macro:.4f} Sens={sens_macro:.4f}"
-            )
+            writer.add_scalar("val/loss", avg_val_loss, epoch)
+            writer.add_scalar("val/acc", avg_val_acc, epoch)
+            writer.add_scalar("val/f1_macro", f1_macro, epoch)
+            writer.add_scalar("val/auroc_macro", auroc_macro, epoch)
+            writer.add_scalar("val/sensitivity_macro", sens_macro, epoch)
 
             # ── IMAGE LOGGING with Grad-CAM ──
-            img_cfg = tb_cfg.get("image_logging", {})
-            if writer and img_cfg.get("enable", False) and (epoch in img_cfg.get("log_at_epochs", [])):
+            img_cfg = log_cfg.get("image_logging", {})
+            if img_cfg.get("enable", False) and (epoch in img_cfg.get("log_at_epochs", [])):
                 # a) Grab a small batch from val_loader
                 samples = next(iter(val_loader))
                 imgs_sample, labels_sample = (
@@ -696,20 +668,9 @@ def train_one_fold(
                 overlays_np = np.stack(overlays, axis=0)            # [B, H, W, 3]
                 overlays_t = torch.from_numpy(overlays_np).permute(0, 3, 1, 2)  # [B,3,H,W]
 
-                # g) Log overlays under tag "Val/GradCAM_E{epoch}"
-                writer.add_images(f"Val/GradCAM_E{epoch}", overlays_t, global_step=epoch)
-
-                # h) (Optional) also write the raw inputs or text labels as before
-                #     If you still want the plain inputs:
-                writer.add_images(f"Val/RawInputs_E{epoch}", imgs_denorm, global_step=epoch)
-
-                # Optionally log predicted vs. true labels as text
-                for idx, (gt, pred) in enumerate(zip(labels_sample.cpu().tolist(), preds_sample.cpu().tolist())):
-                    writer.add_text(
-                        f"Val/Pred_E{epoch}",
-                        f"Index {idx}: GT={gt}, Pred={pred}",
-                        epoch * B + idx
-                    )
+                # g) Log Grad-CAM overlays + raw inputs to the W&B Media panel.
+                writer.add_images("media/gradcam", overlays_t, global_step=epoch)
+                writer.add_images("media/inputs", imgs_denorm, global_step=epoch)
             # ── end IMAGE LOGGING ──
 
             # Choose primary metric
@@ -748,11 +709,11 @@ def train_one_fold(
                         opt_sens_list.append(0.0)
                 if model_sel_metric == "mean_optimal_sensitivity" and len(opt_sens_list) > 0:
                     current_metric = float(np.nanmean(opt_sens_list))
-                if writer:
-                    writer.add_text(f"Val/optimal_thresholds", str(opt_thresholds), epoch)
+                writer.add_text("val/optimal_thresholds", str(opt_thresholds), epoch)
 
             # Save best model
-            if current_metric > best_metric:
+            is_best = current_metric > best_metric
+            if is_best:
                 best_metric = current_metric
                 best_epoch = epoch
                 best_path = ckpt_dir / f"{exp_name}_fold{fold_id}_best.pt"
@@ -771,10 +732,23 @@ def train_one_fold(
                 if save_thresh and opt_thresholds:
                     data_to_save["optimal_thresholds"] = opt_thresholds
                 torch.save(data_to_save, str(best_path))
-                logger.info(f"[Fold {fold_id}] New best ({model_sel_metric})={best_metric:.4f} at E{epoch}. Saved → {best_path}")
                 patience_counter = 0
             else:
                 patience_counter += 1
+
+            # One concise summary line + CSV row per validated epoch.
+            epoch_secs = time.time() - epoch_start
+            log_epoch(fold=fold_id, epoch=epoch, n_epochs=num_epochs,
+                      train_loss=epoch_loss, train_acc=epoch_acc,
+                      val_loss=avg_val_loss, val_acc=avg_val_acc,
+                      f1=f1_macro, auroc=auroc_macro, sens=sens_macro,
+                      lr=epoch_lr, seconds=epoch_secs, is_best=is_best)
+            metrics_csv.append(epoch=epoch, phase="main",
+                               train_loss=epoch_loss, train_acc=epoch_acc,
+                               val_loss=avg_val_loss, val_acc=avg_val_acc,
+                               f1_macro=f1_macro, auroc_macro=auroc_macro,
+                               sensitivity_macro=sens_macro,
+                               lr=epoch_lr, is_best=int(is_best))
 
             if patience_counter >= early_stop_patience:
                 logger.info(f"[Fold {fold_id}] Early stopping at E{epoch}.")
@@ -799,8 +773,7 @@ def train_one_fold(
     )
     logger.info(f"[Fold {fold_id}] Saved last checkpoint → {last_path}")
 
-    if writer:
-        writer.close()
+    writer.close()
 
     return best_metric if best_epoch >= 0 else None
 

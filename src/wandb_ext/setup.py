@@ -1,48 +1,23 @@
-"""Weights & Biases run setup + a transparent TensorBoard->W&B scalar mirror.
+"""Weights & Biases run setup.
 
-The legacy trainers log through a raw ``torch.utils.tensorboard.SummaryWriter``
-(``writer.add_scalar(tag, value, step)``). Rather than thread a logger object
-through the deep training loop, we monkeypatch ``SummaryWriter.add_scalar`` once
-so every scalar is also forwarded to the active W&B run. Scalars are logged
-without an explicit step (W&B auto-increments) because the loop mixes per-batch
-global steps with per-epoch steps, which would otherwise be non-monotonic.
+The legacy trainers log through a ``SummaryWriter``-shaped object; we hand them a
+``WandbWriter`` (see ``src/wandb_ext/writer.py``) that forwards scalars/media to
+the active W&B run instead of writing TensorBoard event files. This module owns
+run creation, the metric schema (a shared ``epoch`` step axis), and the run-level
+"best value" summaries.
 """
 from __future__ import annotations
 
 import logging
 
-from torch.utils.tensorboard import SummaryWriter
-
 logger = logging.getLogger(__name__)
 
-# Validation tags worth a run-level summary (best value over training).
+# Validation tags worth a run-level summary (best value over training). These match
+# the unified lowercase schema emitted by both trainers.
 _VAL_MAX_TAGS = (
-    "Val/Acc_epoch", "Val/F1_macro", "Val/AUROC_macro", "Val/Sensitivity_macro",
+    "val/acc", "val/f1_macro", "val/auroc_macro", "val/sensitivity_macro",
 )
-_VAL_MIN_TAGS = ("Val/Loss_epoch",)
-
-_PATCHED = False
-
-
-def _patch_summary_writer(wandb):
-    """Make every ``SummaryWriter.add_scalar`` also log to the active W&B run."""
-    global _PATCHED
-    if _PATCHED:
-        return
-    original = SummaryWriter.add_scalar
-
-    def add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
-        original(self, tag, scalar_value, global_step, *args, **kwargs)
-        if wandb.run is not None:
-            try:
-                value = float(scalar_value.item() if hasattr(scalar_value, "item")
-                              else scalar_value)
-                wandb.log({tag: value})
-            except Exception:  # never let logging break training
-                pass
-
-    SummaryWriter.add_scalar = add_scalar
-    _PATCHED = True
+_VAL_MIN_TAGS = ("val/loss",)
 
 
 def init_wandb(cfg: dict, run_name: str, group: str | None = None,
@@ -74,10 +49,14 @@ def init_wandb(cfg: dict, run_name: str, group: str | None = None,
         reinit=True,
     )
 
+    # All epoch scalars share a clean, monotonic x-axis.
+    run.define_metric("epoch")
+    run.define_metric("train/*", step_metric="epoch")
+    run.define_metric("val/*", step_metric="epoch")
     for tag in _VAL_MAX_TAGS:
-        run.define_metric(tag, summary="max")
+        run.define_metric(tag, step_metric="epoch", summary="max")
     for tag in _VAL_MIN_TAGS:
-        run.define_metric(tag, summary="min")
+        run.define_metric(tag, step_metric="epoch", summary="min")
 
     if wb_cfg.get("log_code", True):
         try:
@@ -85,7 +64,6 @@ def init_wandb(cfg: dict, run_name: str, group: str | None = None,
         except Exception as e:
             logger.warning(f"W&B log_code failed: {e}")
 
-    _patch_summary_writer(wandb)
     logger.info(f"W&B run started: {run.name} (project={run.project}).")
     return run
 

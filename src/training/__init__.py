@@ -1,9 +1,7 @@
-"""Legacy training loops (single-fold / CV, with and without metadata fusion).
+"""Training loops for single-fold runs, with and without metadata fusion.
 
-Run as modules, e.g.:
-    python -m src.training.single_fold b0_cross_entropy_w_sampler --fold_id 0
-    python -m src.training.cv --config_file configs/effnetb3.yaml
-
-The Hydra entrypoint ``src/train.py`` imports ``single_fold`` and calls its
-``train_one_fold`` directly.
+The Hydra entrypoint ``src/train.py`` imports ``single_fold`` (image-only) and
+``single_fold_meta`` (image + patient metadata) and calls their
+``train_one_fold`` / ``train_one_fold_with_meta`` directly. Cross-validation is
+just these loops run once per fold (``run.all_folds=true``).
 """

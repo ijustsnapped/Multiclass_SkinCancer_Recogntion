@@ -5,6 +5,7 @@ from .torch_utils import get_device, CudaTimer, reset_cuda_peak_memory_stats, em
 from .tb_logger import TensorBoardLogger
 from .plot_utils import generate_confusion_matrix_figure
 from .stat_utils import bootstrap_metric, calculate_ci # <<< ADDED THIS LINE
+from .console import configure_logging, epoch_bar, log_epoch, MetricsCSV
 
 __all__ = [
     "set_seed", "load_config", "cast_config_values",
@@ -12,5 +13,6 @@ __all__ = [
     "get_device", "CudaTimer", "reset_cuda_peak_memory_stats", "empty_cuda_cache",
     "TensorBoardLogger",
     "generate_confusion_matrix_figure",
-    "bootstrap_metric", "calculate_ci"  # <<< ADDED THESE NAMES
+    "bootstrap_metric", "calculate_ci",
+    "configure_logging", "epoch_bar", "log_epoch", "MetricsCSV",
 ]

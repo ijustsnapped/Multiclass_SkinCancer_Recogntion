@@ -20,6 +20,11 @@ defaults:
   - wandb: default
   - _self_
   - experiment: null
+  # Let our compact UTF-8 console config (src/utils/console.py) own logging instead
+  # of Hydra's verbose [time][module][LEVEL] format (which also breaks on non-ASCII
+  # arrows under Windows cp1252). Overrides must sit at the end of the list.
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
 
 # --- run control (consumed by src/train.py, not the legacy schema) ---
 run:
@@ -54,28 +59,23 @@ torch_compile:
   enable: false
   mode: default
 
-tensorboard_logging:
-  enable: true
-  log_interval_batches_train: 40
-  log_interval_batches_val: 10
-  log_epoch_summary: true
-  log_lr: true
-  log_throughput: true
-  log_gpu_time_epoch: true
+# Metrics + media go to Weights & Biases (no TensorBoard). Per-epoch scalars are
+# logged every epoch under train/* and val/*; a per-fold metrics.csv is written
+# next to the checkpoints as an offline record. Heavy artifacts (GradCAM, dataset
+# media) are gated below so they don't run every epoch.
+logging:
+  media:
+    enable: true          # one-time W&B panel: augmented samples, class examples, aug variety
   image_logging:
-    enable: false
+    enable: false         # per-epoch GradCAM overlays (expensive); on -> only at log_at_epochs
     num_samples: 4
     denormalize: true
     log_at_epochs: [2, 20, 39]
-    log_train_input: false
-    log_val_input: false
   profiler:
     enable: false
     profile_epoch: 1
   memory_logging:
-    enable: true
-    log_interval_batches: 100
-    log_epoch_summary: true
+    enable: false
 
 # Keep Hydra's run dir tidy and do NOT chdir, so relative data paths
 # (splits/...) resolve from the directory you launch from.

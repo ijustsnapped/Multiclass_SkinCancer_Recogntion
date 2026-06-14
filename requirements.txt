@@ -13,7 +13,6 @@ opencv-python
 PyYAML
 pytorch-grad-cam
 Pillow
-tensorboard
 jupyter
 
 # Experiment config / tracking / HPO

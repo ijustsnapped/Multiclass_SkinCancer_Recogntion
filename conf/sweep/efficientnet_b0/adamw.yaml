@@ -14,7 +14,7 @@
 program: src/train.py
 method: bayes
 metric:
-  name: Val/Sensitivity_macro
+  name: val/sensitivity_macro
   goal: maximize
 early_terminate:
   type: hyperband
