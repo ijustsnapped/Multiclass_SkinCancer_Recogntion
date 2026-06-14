@@ -9,7 +9,8 @@ paths:
   ckpt_dir: outputs/checkpoints
 
 data:
-  num_workers: 8
+  num_workers: 6        # Ryzen 5 5600X: 6 physical cores / 12 threads. 0 = main process (instant start).
+  persistent_workers: true
   prefetch_factor: 4
   image_loader: pil
   enable_ram_cache: false

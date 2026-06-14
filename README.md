@@ -29,18 +29,23 @@ Downloading means you accept the licenses on the
 ```bash
 python scripts/download_isic2019.py        # add --with-test for the test set
 python scripts/prepare_isic2019.py --folds 5
+python scripts/resize_images.py --update-labels
 ```
 
 That gives you:
 
 ```
 data/raw/ISIC_2019_Training_Input/    25,331 JPEGs
+data/resized/ISIC_2019_Training_Input/ resized training JPEGs
 splits/training/labels.csv            dataset,filename,label,fold
 splits/training/hot_one_meta.csv      image, age_zscore, anatom_site_*, sex_*
 ```
 
 The `dataset` column in `labels.csv` is a relative path from `splits/training/`
-to the image folder, so the images stay where they are (no copying).
+to the image folder. After `resize_images.py --update-labels`, training reads
+from `data/resized/ISIC_2019_Training_Input` instead of decoding the full-res
+JPEGs every epoch. The script is resumable and keeps a
+`splits/training/labels.csv.raw.bak` backup before repointing the CSV.
 
 Manual download links:
 - Images: `https://isic-archive.s3.amazonaws.com/challenges/2019/ISIC_2019_Training_Input.zip`
