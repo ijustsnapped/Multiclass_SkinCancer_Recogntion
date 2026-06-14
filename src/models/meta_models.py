@@ -5,6 +5,44 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _prepare_backbone(base_cnn: nn.Module) -> int:
+    """Strip the classification head off a backbone (in place) and return its
+    feature dimension. Shared by every metadata-fusion model so the
+    backbone-introspection logic lives in one place."""
+    if hasattr(base_cnn, "get_classifier"):
+        feat_dim = base_cnn.get_classifier().in_features
+        base_cnn.reset_classifier(0, "")  # keep spatial features (global_pool='')
+    elif hasattr(base_cnn, "fc"):
+        feat_dim = base_cnn.fc.in_features
+        base_cnn.fc = nn.Identity()
+    elif hasattr(base_cnn, "classifier"):
+        clf = base_cnn.classifier
+        if isinstance(clf, nn.Linear):
+            feat_dim = clf.in_features
+            base_cnn.classifier = nn.Identity()
+        elif isinstance(clf, nn.Sequential):
+            feat_dim = next((l.in_features for l in clf if isinstance(l, nn.Linear)), None)
+            if feat_dim is None:
+                raise ValueError("Could not determine feature dim from Sequential classifier.")
+            base_cnn.classifier = nn.Identity()
+        else:
+            raise ValueError("Unsupported classifier structure to get feature_dim.")
+    else:
+        raise ValueError("Cannot determine feature dimension / reset classifier for backbone.")
+    logger.info(f"Base CNN feature dimension: {feat_dim}")
+    return feat_dim
+
+
+def _backbone_feature_map(base_cnn: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """Return the backbone's spatial feature map ``(B, C, H, W)`` for ``x``,
+    preferring timm's ``forward_features``."""
+    if hasattr(base_cnn, "forward_features"):
+        feats = base_cnn.forward_features(x)
+    else:
+        feats = base_cnn(x)
+    return feats
+
 class MetadataMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int = 256, output_dim: int = 256, dropout_p: float = 0.4):
         super().__init__()
@@ -43,38 +81,9 @@ class CNNWithMetadata(nn.Module):
                  post_concat_dropout_p: float = 0.4):
         super().__init__()
         self.base_cnn_model = base_cnn_model
-        
-        # Get feature dimension from base_cnn_model (assuming timm model)
-        # Method 1: If base_cnn_model has a get_classifier method
-        if hasattr(self.base_cnn_model, 'get_classifier'):
-            self.cnn_feature_dim = self.base_cnn_model.get_classifier().in_features
-            # Remove original classifier, features will be output of forward_features or main forward
-            self.base_cnn_model.reset_classifier(0, '') # Global pool set to '' if not needed, or specify
-        # Method 2: More general, assumes final layer is .fc or .classifier
-        elif hasattr(self.base_cnn_model, 'fc'):
-            self.cnn_feature_dim = self.base_cnn_model.fc.in_features
-            self.base_cnn_model.fc = nn.Identity()
-        elif hasattr(self.base_cnn_model, 'classifier'): # e.g. some torchvision models
-            # This is trickier as 'classifier' can be a Sequential block
-            # For simplicity, let's assume it's a single Linear layer for this example
-            if isinstance(self.base_cnn_model.classifier, nn.Linear):
-                self.cnn_feature_dim = self.base_cnn_model.classifier.in_features
-                self.base_cnn_model.classifier = nn.Identity()
-            elif isinstance(self.base_cnn_model.classifier, nn.Sequential):
-                 # Try to get in_features from the first linear layer in the Sequential classifier
-                for layer in self.base_cnn_model.classifier:
-                    if isinstance(layer, nn.Linear):
-                        self.cnn_feature_dim = layer.in_features
-                        break
-                else:
-                    raise ValueError("Could not determine CNN feature dimension from Sequential classifier.")
-                self.base_cnn_model.classifier = nn.Identity() # Replace the whole block
-            else:
-                raise ValueError("Unsupported base_cnn_model classifier structure to get feature_dim.")
-        else:
-            raise ValueError("Cannot determine feature dimension or reset classifier for base_cnn_model.")
+        self.metadata_input_dim = metadata_input_dim
 
-        logger.info(f"Base CNN feature dimension: {self.cnn_feature_dim}")
+        self.cnn_feature_dim = _prepare_backbone(self.base_cnn_model)
 
         self.metadata_mlp = MetadataMLP(
             input_dim=metadata_input_dim,
@@ -129,3 +138,70 @@ class CNNWithMetadata(nn.Module):
             param.requires_grad = trainable
         status = "trainable" if trainable else "frozen"
         logger.info(f"Base CNN model parameters set to {status}.")
+
+
+class MetaBlock(nn.Module):
+    """Attention-based metadata fusion (Pacheco & Krohling, 2021).
+
+    Metadata produces per-channel gate/shift terms that modulate the CNN feature
+    map before pooling, so the network emphasises image features conditioned on
+    the patient context. Outperforms plain concatenation in the literature.
+    """
+    def __init__(self, n_channels: int, metadata_dim: int):
+        super().__init__()
+        self.fb = nn.Linear(metadata_dim, n_channels)
+        self.gb = nn.Linear(metadata_dim, n_channels)
+
+    def forward(self, V: torch.Tensor, meta: torch.Tensor) -> torch.Tensor:
+        # V: (B, C, H, W) feature map; meta: (B, M)
+        t1 = self.fb(meta).unsqueeze(-1).unsqueeze(-1)   # (B, C, 1, 1)
+        t2 = self.gb(meta).unsqueeze(-1).unsqueeze(-1)   # (B, C, 1, 1)
+        return torch.sigmoid(torch.tanh(V * t1) + t2)
+
+
+class CNNWithMetaBlock(nn.Module):
+    """Backbone + MetaBlock attention fusion + linear head.
+
+    Drop-in alternative to :class:`CNNWithMetadata` with the same
+    ``forward(image, metadata)`` signature, selectable via ``meta_fusion=metablock``.
+    """
+    def __init__(self, base_cnn_model: nn.Module, num_classes: int,
+                 metadata_input_dim: int, classifier_dropout_p: float = 0.0):
+        super().__init__()
+        self.base_cnn_model = base_cnn_model
+        self.metadata_input_dim = metadata_input_dim
+        self.cnn_feature_dim = _prepare_backbone(self.base_cnn_model)
+
+        self.metablock = MetaBlock(self.cnn_feature_dim, metadata_input_dim)
+        self.dropout = nn.Dropout(p=classifier_dropout_p)
+        self.final_classifier = nn.Linear(self.cnn_feature_dim, num_classes)
+        logger.info(f"CNNWithMetaBlock initialized: CNN feats={self.cnn_feature_dim}, "
+                    f"meta_dim={metadata_input_dim}, NumClasses={num_classes}")
+
+    def forward(self, image_input: torch.Tensor, metadata_input: torch.Tensor) -> torch.Tensor:
+        fmap = _backbone_feature_map(self.base_cnn_model, image_input)
+        if fmap.ndim == 2:  # backbone already pooled -> restore spatial dims for the block
+            fmap = fmap.unsqueeze(-1).unsqueeze(-1)
+        fmap = self.metablock(fmap, metadata_input)
+        pooled = nn.functional.adaptive_avg_pool2d(fmap, (1, 1)).flatten(1)
+        return self.final_classifier(self.dropout(pooled))
+
+    def set_base_cnn_trainable(self, trainable: bool):
+        for param in self.base_cnn_model.parameters():
+            param.requires_grad = trainable
+        status = "trainable" if trainable else "frozen"
+        logger.info(f"Base CNN model parameters set to {status}.")
+
+
+def build_meta_model(base_cnn_model: nn.Module, num_classes: int,
+                     metadata_input_dim: int, fusion: str = "concat", **head_args) -> nn.Module:
+    """Construct a metadata-fusion model. ``fusion='concat'`` -> CNNWithMetadata
+    (feature concatenation); ``fusion='metablock'`` -> CNNWithMetaBlock (attention)."""
+    fusion = (fusion or "concat").lower()
+    if fusion in ("concat", "concatenation"):
+        return CNNWithMetadata(base_cnn_model, num_classes, metadata_input_dim, **head_args)
+    if fusion == "metablock":
+        dropout = head_args.get("post_concat_dropout_p", head_args.get("meta_dropout_p", 0.0))
+        return CNNWithMetaBlock(base_cnn_model, num_classes, metadata_input_dim,
+                                classifier_dropout_p=dropout)
+    raise ValueError(f"Unknown meta_fusion '{fusion}'. Use 'concat' or 'metablock'.")

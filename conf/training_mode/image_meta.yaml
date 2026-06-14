@@ -1,0 +1,23 @@
+# @package _global_
+# Image + patient-metadata fusion. Routes src/train.py -> training.single_fold_meta,
+# which reads paths.meta_csv (splits/training/hot_one_meta.csv) and fuses the
+# age/sex/anatomical-site features with image features.
+training_mode: image_meta
+
+data:
+  # null => use every column of hot_one_meta.csv except `image`; the dataset
+  # detects metadata_dim at runtime (src/data/datasets.py: FlatDatasetWithMeta).
+  meta_features_names: null
+  meta_augmentation_p: 0.1     # randomly mask a metadata group (regularization)
+  meta_nan_fill_value: 0.0
+
+model:
+  # Fusion strategy: "concat" (CNNWithMetadata) or "metablock" (attention).
+  meta_fusion: concat
+  pretrained_cnn: true
+  meta_head_args:              # consumed by CNNWithMetadata (concat); ignored fields are harmless
+    meta_mlp_hidden_dim: 256
+    meta_mlp_output_dim: 256
+    meta_dropout_p: 0.4
+    post_concat_dim: 1024
+    post_concat_dropout_p: 0.4

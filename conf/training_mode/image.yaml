@@ -1,0 +1,3 @@
+# @package _global_
+# Image-only training (default). Routes src/train.py -> training.single_fold.
+training_mode: image

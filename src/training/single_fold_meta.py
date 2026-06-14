@@ -42,7 +42,7 @@ from src.data import (
     FlatDatasetWithMeta, build_transform, build_gpu_transform_pipeline,
     ClassBalancedSampler
 )
-from src.models import get_model as get_base_cnn_model, CNNWithMetadata
+from src.models import get_model as get_base_cnn_model, CNNWithMetadata, build_meta_model
 from src.losses import focal_ce_loss, LDAMLoss
 from src.utils import (
     set_seed, load_config, cast_config_values,
@@ -290,7 +290,7 @@ def run_training_phase(
                     labels_cpu = second
                 else:
                     imgs_cpu, labels_cpu = batch
-                    meta_dim = model.metadata_mlp.fc1.in_features
+                    meta_dim = getattr(getattr(model, '_orig_mod', model), 'metadata_input_dim', None)
                     meta_cpu = torch.zeros((labels_cpu.size(0), meta_dim), dtype=torch.float32)
             else:
                 raise ValueError(f"Unexpected batch structure: len(batch)={len(batch)}")
@@ -403,7 +403,7 @@ def run_training_phase(
                             labels_cpu = second
                         else:
                             imgs_cpu, labels_cpu = batch
-                            meta_dim = model.metadata_mlp.fc1.in_features
+                            meta_dim = getattr(getattr(model, '_orig_mod', model), 'metadata_input_dim', None)
                             meta_cpu = torch.zeros((labels_cpu.size(0), meta_dim), dtype=torch.float32)
                     else:
                         raise ValueError(f"Unexpected batch structure: len(batch)={len(batch)}")
@@ -528,7 +528,7 @@ def run_training_phase(
                     "label2idx_eval": label2idx_eval,
                     "phase_name": phase_name,
                     f"best_{model_sel_metric}": best_metric,
-                    "metadata_dim": model.metadata_mlp.fc1.in_features
+                    "metadata_dim": getattr(getattr(model, '_orig_mod', model), 'metadata_input_dim', None)
                 }
                 if ema_model is not None and (phase_name == "P1_Joint"):
                     ckpt_data["ema_model_state_dict"] = getattr(ema_model, '_orig_mod', ema_model).state_dict()
@@ -570,7 +570,7 @@ def run_training_phase(
         "label2idx_eval": label2idx_eval,
         "phase_name": phase_name,
         "current_primary_metric": best_metric,
-        "metadata_dim": model.metadata_mlp.fc1.in_features
+        "metadata_dim": getattr(getattr(model, '_orig_mod', model), 'metadata_input_dim', None)
     }
     if ema_model is not None and (phase_name == "P1_Joint"):
         last_data["ema_model_state_dict"] = getattr(ema_model, '_orig_mod', ema_model).state_dict()
@@ -656,12 +656,15 @@ def train_one_fold_with_meta(
     }
     base_cnn = get_base_cnn_model(base_cnn_params)
     meta_head_args = model_cfg.get("meta_head_args", {}).copy()
-    model = CNNWithMetadata(
+    meta_fusion = model_cfg.get("meta_fusion", "concat")
+    model = build_meta_model(
         base_cnn_model=base_cnn,
         num_classes=len(label2idx_model),
         metadata_input_dim=metadata_dim,
+        fusion=meta_fusion,
         **meta_head_args
     ).to(device)
+    logger.info(f"Fold {fold_str}: metadata fusion = '{meta_fusion}'")
 
     # Set up EMA
     ema_model = None

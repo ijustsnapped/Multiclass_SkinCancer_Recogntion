@@ -8,11 +8,13 @@ tqdm
 scikit-learn
 torchmetrics
 matplotlib
+seaborn
 opencv-python
 PyYAML
 pytorch-grad-cam
 Pillow
 tensorboard
+jupyter
 
 # Experiment config / tracking / HPO
 hydra-core>=1.3

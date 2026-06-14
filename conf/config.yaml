@@ -16,6 +16,7 @@ defaults:
   - optim: adamw
   - loss: cross_entropy
   - sampler: class_balanced_sqrt
+  - training_mode: image
   - wandb: default
   - _self_
   - experiment: null
